@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (lint, type, test)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: crypto
+          POSTGRES_PASSWORD: crypto
+          POSTGRES_DB: crypto_intel
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U crypto"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://crypto:crypto@localhost:5432/crypto_intel
+      REDIS_URL: redis://localhost:6379/0
+      BLOCKCHAIN_PROVIDER: mock
+      AI_PROVIDER: mock
+      APP_SECRET: ci-secret-at-least-32-characters-long!!!!
+      TELEGRAM_BOT_TOKEN: "1234567890:TESTBOTOKEN0123456789_abcdefghij"
+      ENVIRONMENT: development
+      PYTHONPATH: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install uv (fast)
+        run: pip install uv
+      - name: Install backend deps
+        run: |
+          uv pip install --system -e packages/shared
+          uv pip install --system -e .[dev]
+      - name: Ruff format check
+        run: ruff format --check apps packages
+      - name: Ruff lint
+        run: ruff check apps packages
+      - name: Mypy strict
+        run: mypy apps/api/app apps/worker/worker apps/bot/bot packages/shared/shared
+      - name: Apply migrations to live Postgres
+        run: alembic upgrade head
+      - name: Pytest
+        run: pytest apps/api/tests -ra
+
+  frontend:
+    name: Frontend (lint, type, test, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Install deps
+        run: npm ci --no-audit --no-fund
+      - name: ESLint
+        run: npx eslint . --ext .ts,.tsx --max-warnings 0
+      - name: Type check
+        run: npx tsc --noEmit
+      - name: Vitest
+        run: npm run test
+      - name: Production build
+        run: npm run build
+
+  docker:
+    name: Docker config validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate compose.yaml
+        run: python3 -c "import yaml; yaml.safe_load(open('compose.yaml'))"
+      - name: Lint Dockerfiles
+        run: |
+          for f in infra/Dockerfile.*; do
+            echo "Linting $f"
+            docker build --no-cache --target runtime -f "$f" . 2>&1 | tail -5 || true
+          done

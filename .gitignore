@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+.env
+.env.local
+.env.*.local
+
+# Type checkers / linters
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.tox/
+.coverage
+htmlcov/
+coverage.xml
+
+# Frontend
+node_modules/
+apps/web/dist/
+apps/web/build/
+apps/web/.vite/
+*.tsbuildinfo
+.eslintcache
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# Docker
+docker-compose.override.yml
+
+# Local databases / runtime
+*.sqlite3
+*.db
+postgres-data/
+redis-data/
+
+# Build / packaging output
+*.zip
+*.tar.gz
+release/

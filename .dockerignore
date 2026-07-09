@@ -1,0 +1,39 @@
+# Build artifacts
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.pytest_cache
+**/.ruff_cache
+**/.mypy_cache
+**/.coverage
+**/coverage.xml
+**/htmlcov
+
+# Frontend
+apps/web/node_modules
+apps/web/dist
+apps/web/.vite
+**/.eslintcache
+**/*.tsbuildinfo
+
+# Env & secrets
+.env
+.env.*
+!.env.example
+
+# IDE / OS
+**/.vscode
+**/.idea
+**/.DS_Store
+**/*.swp
+
+# Docker
+docker-compose.override.yml
+
+# Project
+**/*.zip
+**/*.tar.gz
+**/release
+.git
+.github
+download

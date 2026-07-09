@@ -1,0 +1,142 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: crypto
+      POSTGRES_PASSWORD: crypto
+      POSTGRES_DB: crypto_intel
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crypto -d crypto_intel"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - cip-net
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - cip-net
+
+  api:
+    build:
+      context: .
+      dockerfile: infra/Dockerfile.api
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: development
+      DATABASE_URL: postgresql+asyncpg://crypto:crypto@db:5432/crypto_intel
+      REDIS_URL: redis://redis:6379/0
+      BLOCKCHAIN_PROVIDER: ${BLOCKCHAIN_PROVIDER:-mock}
+      BLOCKCHAIN_API_KEY: ${BLOCKCHAIN_API_KEY:-}
+      AI_PROVIDER: ${AI_PROVIDER:-mock}
+      AI_API_KEY: ${AI_API_KEY:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_WEBAPP_URL: ${TELEGRAM_WEBAPP_URL:-http://localhost:5173}
+      APP_SECRET: ${APP_SECRET:-dev-only-secret-do-not-use-in-production-32chars}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health/live')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - cip-net
+
+  worker:
+    build:
+      context: .
+      dockerfile: infra/Dockerfile.worker
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: development
+      DATABASE_URL: postgresql+asyncpg://crypto:crypto@db:5432/crypto_intel
+      REDIS_URL: redis://redis:6379/0
+      BLOCKCHAIN_PROVIDER: ${BLOCKCHAIN_PROVIDER:-mock}
+      BLOCKCHAIN_API_KEY: ${BLOCKCHAIN_API_KEY:-}
+      AI_PROVIDER: ${AI_PROVIDER:-mock}
+      AI_API_KEY: ${AI_API_KEY:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      APP_SECRET: ${APP_SECRET:-dev-only-secret-do-not-use-in-production-32chars}
+    networks:
+      - cip-net
+
+  bot:
+    build:
+      context: .
+      dockerfile: infra/Dockerfile.bot
+    depends_on:
+      - api
+    environment:
+      ENVIRONMENT: development
+      DATABASE_URL: postgresql+asyncpg://crypto:crypto@db:5432/crypto_intel
+      REDIS_URL: redis://redis:6379/0
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_WEBAPP_URL: ${TELEGRAM_WEBAPP_URL:-http://localhost:5173}
+      APP_SECRET: ${APP_SECRET:-dev-only-secret-do-not-use-in-production-32chars}
+    networks:
+      - cip-net
+    profiles: ["bot"]
+
+  web:
+    build:
+      context: .
+      dockerfile: infra/Dockerfile.web
+    depends_on:
+      - api
+    environment:
+      VITE_API_BASE: /api/v1
+    ports:
+      - "5173:80"
+    networks:
+      - cip-net
+
+  migrate:
+    build:
+      context: .
+      dockerfile: infra/Dockerfile.api
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://crypto:crypto@db:5432/crypto_intel
+      REDIS_URL: redis://redis:6379/0
+      BLOCKCHAIN_PROVIDER: ${BLOCKCHAIN_PROVIDER:-mock}
+      AI_PROVIDER: ${AI_PROVIDER:-mock}
+    command: ["bash", "-c", "alembic upgrade head"]
+    networks:
+      - cip-net
+    profiles: ["migrate"]
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  cip-net:
+    driver: bridge

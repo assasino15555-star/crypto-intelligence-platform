@@ -1,0 +1,13 @@
+[project]
+name = "shared"
+version = "0.1.0"
+description = "Shared domain types for the crypto-intelligence-platform services."
+requires-python = ">=3.12"
+dependencies = ["pydantic>=2.7"]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
