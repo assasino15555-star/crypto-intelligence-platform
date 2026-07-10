@@ -26,17 +26,28 @@ function setToken(token: string | null): void {
 
 export { getToken, setToken };
 
+function isApiPath(path: string): boolean {
+  return path.startsWith("/") || path.startsWith(API_BASE);
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  if (!isApiPath(path)) {
+    throw new Error("blocked cross-origin request");
+  }
   const headers = new Headers(init.headers);
   headers.set("Accept", "application/json");
   if (init.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
   const token = getToken();
-  if (token) {
+  if (token && path.startsWith(API_BASE)) {
     headers.set("Authorization", `Bearer ${token}`);
   }
-  const resp = await fetch(`${API_BASE}${path}`, { ...init, headers });
+  const url = path.startsWith("/") ? `${API_BASE}${path}` : path;
+  const resp = await fetch(url, { ...init, headers });
+  if (resp.status === 401 || resp.status === 403) {
+    setToken(null);
+  }
   if (!resp.ok) {
     let code = "http_error";
     let message = `HTTP ${resp.status}`;
@@ -45,7 +56,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       code = body?.error?.code ?? code;
       message = body?.error?.message ?? message;
     } catch {
-      // ignore parse error
+      // ignore
     }
     const err = new Error(message) as Error & { code: string; status: number };
     err.code = code;
@@ -66,9 +77,12 @@ export const api = {
     }),
   me: () => request<User>("/auth/me"),
   logout: () => request<void>("/auth/logout", { method: "POST" }),
+  revokeAll: () => request<void>("/auth/revoke-all", { method: "POST" }),
 
-  listWallets: (page = 1, pageSize = 20) =>
-    request<PageResponse<Wallet>>(`/wallets?page=${page}&page_size=${pageSize}`),
+  listWallets: (page = 1, pageSize = 20, activeOnly = false) =>
+    request<PageResponse<Wallet>>(
+      `/wallets?page=${page}&page_size=${pageSize}${activeOnly ? "&active_only=true" : ""}`,
+    ),
   createWallet: (chain: string, address: string, label: string | null) =>
     request<Wallet>("/wallets", {
       method: "POST",
@@ -102,8 +116,10 @@ export const api = {
         note,
       }),
     }),
-  updateAlert: (id: string, patch: { is_active?: boolean; threshold_amount?: number | null; note?: string | null }) =>
-    request<Alert>(`/alerts/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  updateAlert: (
+    id: string,
+    patch: { is_active?: boolean; threshold_amount?: number | null; note?: string | null },
+  ) => request<Alert>(`/alerts/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   deleteAlert: (id: string) => request<void>(`/alerts/${id}`, { method: "DELETE" }),
   listAlertKinds: () => request<string[]>("/alerts/kinds"),
 

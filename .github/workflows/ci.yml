@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -16,10 +19,10 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres:16.4-alpine3.20
         env:
           POSTGRES_USER: crypto
-          POSTGRES_PASSWORD: crypto
+          POSTGRES_PASSWORD: ci_password_change_me
           POSTGRES_DB: crypto_intel
         ports:
           - 5432:5432
@@ -29,7 +32,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
       redis:
-        image: redis:7-alpine
+        image: redis:7.4-alpine3.20
         ports:
           - 6379:6379
         options: >-
@@ -38,26 +41,29 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
-      DATABASE_URL: postgresql+asyncpg://crypto:crypto@localhost:5432/crypto_intel
+      ENVIRONMENT: development
+      DATABASE_URL: postgresql+asyncpg://crypto:ci_password_change_me@localhost:5432/crypto_intel
       REDIS_URL: redis://localhost:6379/0
       BLOCKCHAIN_PROVIDER: mock
       AI_PROVIDER: mock
       APP_SECRET: ci-secret-at-least-32-characters-long!!!!
       TELEGRAM_BOT_TOKEN: "1234567890:TESTBOTOKEN0123456789_abcdefghij"
-      ENVIRONMENT: development
+      DEV_BYPASS_AUTH: "false"
+      CORS_ORIGINS: http://localhost:5173
       PYTHONPATH: .
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@d632683dd7b4114ad314bca15554477dd762a938
+      - uses: actions/setup-python@f6774bbe34f71d2c1b686b6f4e8aa3da1cc804ef
         with:
           python-version: "3.12"
           cache: pip
-      - name: Install uv (fast)
+      - name: Install uv
         run: pip install uv
       - name: Install backend deps
         run: |
           uv pip install --system -e packages/shared
           uv pip install --system -e .[dev]
+          uv pip install --system pip-audit bandit
       - name: Ruff format check
         run: ruff format --check apps packages
       - name: Ruff lint
@@ -68,6 +74,21 @@ jobs:
         run: alembic upgrade head
       - name: Pytest
         run: pytest apps/api/tests -ra
+      - name: pip-audit
+        run: pip-audit --strict --desc
+      - name: Bandit SAST
+        run: bandit -r apps/api/app apps/worker apps/bot -ll
+
+  secret-scan:
+    name: Secret scanning (Gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d632683dd7b4114ad314bca15554477dd762a938
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@ffdf6f8b61a78b2e5bc23c5ce4be3fe5a0d7e883
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   frontend:
     name: Frontend (lint, type, test, build)
@@ -76,8 +97,8 @@ jobs:
       run:
         working-directory: apps/web
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@d632683dd7b4114ad314bca15554477dd762a938
+      - uses: actions/setup-node@1e60f620b9521c67ae525c7497be703a324a42d3
         with:
           node-version: "20"
           cache: npm
@@ -92,17 +113,27 @@ jobs:
         run: npm run test
       - name: Production build
         run: npm run build
+      - name: npm audit (high+critical)
+        run: npm audit --audit-level=high
 
   docker:
-    name: Docker config validation
+    name: Docker build and scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@d632683dd7b4114ad314bca15554477dd762a938
       - name: Validate compose.yaml
         run: python3 -c "import yaml; yaml.safe_load(open('compose.yaml'))"
-      - name: Lint Dockerfiles
-        run: |
-          for f in infra/Dockerfile.*; do
-            echo "Linting $f"
-            docker build --no-cache --target runtime -f "$f" . 2>&1 | tail -5 || true
-          done
+      - name: Build API image
+        run: docker build --no-cache --target runtime -f infra/Dockerfile.api -t cip-api:ci .
+      - name: Build Web image
+        run: docker build --no-cache -f infra/Dockerfile.web -t cip-web:ci .
+      - name: Build Worker image
+        run: docker build --no-cache -f infra/Dockerfile.worker -t cip-worker:ci .
+      - name: Build Bot image
+        run: docker build --no-cache -f infra/Dockerfile.bot -t cip-bot:ci .
+      - name: Trivy container scan
+        uses: aquasecurity/trivy-action@915b19bbe73b92a6cf62a8abc56c0c3f3cfe1b05
+        with:
+          image-ref: cip-api:ci
+          severity: HIGH,CRITICAL
+          exit-code: "1"

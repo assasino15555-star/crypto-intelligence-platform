@@ -1,5 +1,3 @@
-"""Shared domain primitives used across services (api, worker, bot)."""
-
 from __future__ import annotations
 
 from .chains import Chain

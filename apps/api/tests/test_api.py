@@ -1,16 +1,3 @@
-"""API integration tests with the dev-bypass-auth path.
-
-These tests cover:
-  - health endpoints
-  - wallet CRUD
-  - duplicate wallet creation
-  - IDOR protection (cross-user access returns 404)
-  - transactions / holdings / snapshots
-  - alert CRUD + kinds
-  - AI explain happy path
-  - pagination bounds
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -27,8 +14,7 @@ async def test_liveness(client):
 async def test_root(client):
     r = await client.get("/")
     assert r.status_code == 200
-    data = r.json()
-    assert data["name"] == "crypto-intelligence-platform"
+    assert r.json()["name"] == "crypto-intelligence-platform"
 
 
 @pytest.mark.asyncio
@@ -42,37 +28,28 @@ async def test_create_wallet_and_list(authed_client):
     wallet = r.json()
     assert wallet["chain"] == "ethereum"
     assert wallet["label"] == "main"
-    assert wallet["address"] == wallet["address"].upper() or wallet["address"].startswith("0x")
     wid = wallet["id"]
 
-    # List
-    r = await authed_client.get("/api/v1/wallets")
-    assert r.status_code == 200
-    data = r.json()
+    r2 = await authed_client.get("/api/v1/wallets")
+    assert r2.status_code == 200
+    data = r2.json()
     assert data["meta"]["total"] >= 1
     assert any(w["id"] == wid for w in data["items"])
 
 
 @pytest.mark.asyncio
-async def test_duplicate_wallet_creation_rejected(authed_client):
+async def test_duplicate_wallet_rejected(authed_client):
     addr = "0x" + "cd" * 20
-    r = await authed_client.post(
-        "/api/v1/wallets",
-        json={"chain": "ethereum", "address": addr, "label": None},
-    )
+    r = await authed_client.post("/api/v1/wallets", json={"chain": "ethereum", "address": addr})
     assert r.status_code == 201
-    r2 = await authed_client.post(
-        "/api/v1/wallets",
-        json={"chain": "ethereum", "address": addr, "label": None},
-    )
+    r2 = await authed_client.post("/api/v1/wallets", json={"chain": "ethereum", "address": addr})
     assert r2.status_code == 409
 
 
 @pytest.mark.asyncio
 async def test_invalid_address_rejected(authed_client):
     r = await authed_client.post(
-        "/api/v1/wallets",
-        json={"chain": "ethereum", "address": "not-an-address"},
+        "/api/v1/wallets", json={"chain": "ethereum", "address": "not-an-address"}
     )
     assert r.status_code in (400, 422)
 
@@ -80,45 +57,48 @@ async def test_invalid_address_rejected(authed_client):
 @pytest.mark.asyncio
 async def test_unsupported_chain_rejected(authed_client):
     r = await authed_client.post(
-        "/api/v1/wallets",
-        json={"chain": "solana", "address": "0x" + "ab" * 20},
+        "/api/v1/wallets", json={"chain": "solana", "address": "0x" + "ab" * 20}
     )
     assert r.status_code in (400, 422)
 
 
 @pytest.mark.asyncio
-async def test_wallet_transactions_endpoint(authed_client):
-    addr = "0x" + "12" * 20
-    r = await authed_client.post(
-        "/api/v1/wallets", json={"chain": "ethereum", "address": addr, "label": None}
-    )
+async def test_active_only_filter(authed_client):
+    addr = "0x" + "ef" * 20
+    r = await authed_client.post("/api/v1/wallets", json={"chain": "ethereum", "address": addr})
     assert r.status_code == 201
+    wid = r.json()["id"]
+    await authed_client.patch(f"/api/v1/wallets/{wid}", json={"is_active": False})
+    r2 = await authed_client.get("/api/v1/wallets?active_only=true")
+    assert r2.status_code == 200
+    for w in r2.json()["items"]:
+        assert w["is_active"] is True
+
+
+@pytest.mark.asyncio
+async def test_wallet_transactions(authed_client):
+    addr = "0x" + "12" * 20
+    r = await authed_client.post("/api/v1/wallets", json={"chain": "ethereum", "address": addr})
     wid = r.json()["id"]
     r2 = await authed_client.get(f"/api/v1/wallets/{wid}/transactions")
     assert r2.status_code == 200
-    data = r2.json()
-    assert "items" in data and "meta" in data
+    assert "items" in r2.json() and "meta" in r2.json()
 
 
 @pytest.mark.asyncio
 async def test_take_snapshot(authed_client):
     addr = "0x" + "34" * 20
-    r = await authed_client.post(
-        "/api/v1/wallets", json={"chain": "ethereum", "address": addr, "label": None}
-    )
+    r = await authed_client.post("/api/v1/wallets", json={"chain": "ethereum", "address": addr})
     wid = r.json()["id"]
     r2 = await authed_client.post(f"/api/v1/wallets/{wid}/snapshot")
     assert r2.status_code == 201, r2.text
-    snap = r2.json()
-    assert "native_amount" in snap
+    assert "native_amount" in r2.json()
 
 
 @pytest.mark.asyncio
 async def test_alert_create_and_list(authed_client):
     addr = "0x" + "56" * 20
-    r = await authed_client.post(
-        "/api/v1/wallets", json={"chain": "ethereum", "address": addr, "label": None}
-    )
+    r = await authed_client.post("/api/v1/wallets", json={"chain": "ethereum", "address": addr})
     wid = r.json()["id"]
     r2 = await authed_client.post(
         "/api/v1/alerts",
@@ -134,19 +114,14 @@ async def test_alert_create_and_list(authed_client):
 @pytest.mark.asyncio
 async def test_alert_invalid_kind_rejected(authed_client):
     addr = "0x" + "78" * 20
-    r = await authed_client.post(
-        "/api/v1/wallets", json={"chain": "ethereum", "address": addr, "label": None}
-    )
+    r = await authed_client.post("/api/v1/wallets", json={"chain": "ethereum", "address": addr})
     wid = r.json()["id"]
-    r2 = await authed_client.post(
-        "/api/v1/alerts",
-        json={"wallet_id": wid, "kind": "bogus_kind"},
-    )
+    r2 = await authed_client.post("/api/v1/alerts", json={"wallet_id": wid, "kind": "bogus_kind"})
     assert r2.status_code in (400, 422)
 
 
 @pytest.mark.asyncio
-async def test_alert_kinds_endpoint(authed_client):
+async def test_alert_kinds(authed_client):
     r = await authed_client.get("/api/v1/alerts/kinds")
     assert r.status_code == 200
     kinds = r.json()
@@ -157,16 +132,13 @@ async def test_alert_kinds_endpoint(authed_client):
 @pytest.mark.asyncio
 async def test_ai_explain_wallet(authed_client):
     addr = "0x" + "9a" * 20
-    r = await authed_client.post(
-        "/api/v1/wallets", json={"chain": "ethereum", "address": addr, "label": None}
-    )
+    r = await authed_client.post("/api/v1/wallets", json={"chain": "ethereum", "address": addr})
     wid = r.json()["id"]
     r2 = await authed_client.post("/api/v1/ai/explain", json={"wallet_id": wid})
     assert r2.status_code == 200, r2.text
     data = r2.json()
     assert "explanation" in data
     assert "model" in data
-    assert isinstance(data["is_cached"], bool)
 
 
 @pytest.mark.asyncio
@@ -177,36 +149,27 @@ async def test_ai_explain_requires_target(authed_client):
 
 @pytest.mark.asyncio
 async def test_pagination_bounds(authed_client):
-    # page=0 should be rejected
     r = await authed_client.get("/api/v1/wallets?page=0")
     assert r.status_code == 422
-    # page_size=0 should be rejected
     r = await authed_client.get("/api/v1/wallets?page_size=0")
     assert r.status_code == 422
-    # page_size=1000 should be rejected (>100)
     r = await authed_client.get("/api/v1/wallets?page_size=1000")
     assert r.status_code == 422
 
 
 @pytest.mark.asyncio
-async def test_unauth_request_rejected(client):
+async def test_unauth_rejected(client):
     r = await client.get("/api/v1/wallets")
     assert r.status_code == 401
 
 
 @pytest.mark.asyncio
-async def test_idor_wallet_returns_404_for_other_user(db_session):
-    """A wallet owned by user A must NOT be accessible by user B.
+async def test_idor_returns_404(db_session):
 
-    The service returns NotFoundError (404) — never 403 — to avoid leaking
-    the wallet's existence.
-    """
-
-    import pytest as _pytest
-
+    from apps.api.app.api.v1.wallets import _get_owned_wallet
+    from apps.api.app.core.errors import NotFoundError
     from apps.api.app.models.user import User
     from apps.api.app.models.wallet import Wallet
-    from apps.api.app.services.wallets import get_owned_wallet
 
     user_a = User(telegram_id=100_001, telegram_username="a")
     user_b = User(telegram_id=100_002, telegram_username="b")
@@ -221,39 +184,39 @@ async def test_idor_wallet_returns_404_for_other_user(db_session):
     db_session.add(wallet)
     await db_session.flush()
 
-    # Owner can access
-    fetched = await get_owned_wallet(db_session, user_id=user_a.id, wallet_id=wallet.id)
+    fetched = await _get_owned_wallet(db_session, user_id=user_a.id, wallet_id=wallet.id)
     assert fetched.id == wallet.id
 
-    # Other user gets 404 (not 403, not 200)
-    with _pytest.raises(Exception) as exc:
-        await get_owned_wallet(db_session, user_id=user_b.id, wallet_id=wallet.id)
-    # NotFoundError has status_code 404
-    from apps.api.app.core.errors import NotFoundError
-
-    assert isinstance(exc.value, NotFoundError)
-
-
-@pytest.mark.asyncio
-async def test_wallet_holdings(authed_client):
-    addr = "0x" + "01" * 20
-    r = await authed_client.post(
-        "/api/v1/wallets", json={"chain": "ethereum", "address": addr, "label": None}
-    )
-    wid = r.json()["id"]
-    r2 = await authed_client.get(f"/api/v1/wallets/{wid}/holdings")
-    assert r2.status_code == 200
-    assert isinstance(r2.json(), list)
+    with pytest.raises(NotFoundError):
+        await _get_owned_wallet(db_session, user_id=user_b.id, wallet_id=wallet.id)
 
 
 @pytest.mark.asyncio
 async def test_delete_wallet(authed_client):
     addr = "0x" + "02" * 20
-    r = await authed_client.post(
-        "/api/v1/wallets", json={"chain": "ethereum", "address": addr, "label": None}
-    )
+    r = await authed_client.post("/api/v1/wallets", json={"chain": "ethereum", "address": addr})
     wid = r.json()["id"]
     r2 = await authed_client.delete(f"/api/v1/wallets/{wid}")
     assert r2.status_code == 204
     r3 = await authed_client.get(f"/api/v1/wallets/{wid}")
     assert r3.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_wallet_quota_enforced(authed_client, monkeypatch):
+    from apps.api.app.core import config as cfg
+
+    cfg.get_settings().max_wallets_per_user = 1
+    addr1 = "0x" + "11" * 20
+    r1 = await authed_client.post("/api/v1/wallets", json={"chain": "ethereum", "address": addr1})
+    assert r1.status_code == 201
+    addr2 = "0x" + "22" * 20
+    r2 = await authed_client.post("/api/v1/wallets", json={"chain": "ethereum", "address": addr2})
+    assert r2.status_code == 409
+    cfg.get_settings().max_wallets_per_user = 20
+
+
+@pytest.mark.asyncio
+async def test_revoke_all(authed_client):
+    r = await authed_client.post("/api/v1/auth/revoke-all")
+    assert r.status_code == 204

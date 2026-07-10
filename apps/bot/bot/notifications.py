@@ -1,5 +1,3 @@
-"""Bot notification helper used by the worker."""
-
 from __future__ import annotations
 
 from aiogram import Bot

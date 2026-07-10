@@ -1,9 +1,3 @@
-"""Structured logging setup.
-
-Never logs secrets. Sanitizes configured keys. Adds a per-request `request_id`
-attribute to every log record (defaults to "-").
-"""
-
 from __future__ import annotations
 
 import contextlib
@@ -33,8 +27,6 @@ _REDACTED = "***"
 
 
 class _RequestIdFilter(logging.Filter):
-    """Ensure every record has a `request_id` attribute (avoids FormatErrors)."""
-
     def filter(self, record: logging.LogRecord) -> bool:
         if not hasattr(record, "request_id"):
             record.request_id = "-"

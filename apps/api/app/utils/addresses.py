@@ -1,5 +1,3 @@
-"""Address validation and normalization for EVM chains."""
-
 from __future__ import annotations
 
 import re
@@ -9,7 +7,6 @@ from shared.domain import AddressType, NormalizedAddress
 
 from ..core.errors import ValidationError
 
-# 0x + 40 hex chars
 _EVM_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
 
@@ -18,7 +15,6 @@ def is_evm_address(address: str) -> bool:
 
 
 def to_eip55(address: str) -> str:
-    """Return EIP-55 checksum-cased address. Assumes input is a valid 0x..40hex."""
     if not is_evm_address(address):
         raise ValidationError("invalid evm address")
     addr_lower = address.lower().removeprefix("0x")
@@ -35,11 +31,6 @@ def to_eip55(address: str) -> str:
 
 
 def validate_address(chain: str, address: str) -> NormalizedAddress:
-    """Validate and normalize an address for a given chain.
-
-    Currently only EVM-style addresses are supported. Other chain types must
-    be added explicitly here.
-    """
     if not address or not isinstance(address, str):
         raise ValidationError("empty address")
     if chain not in Chain.values():

@@ -1,10 +1,3 @@
-"""Normalized domain models returned by blockchain providers.
-
-Provider implementations must translate their own response formats into these
-types so that the rest of the application never depends on a specific vendor's
-JSON schema.
-"""
-
 from __future__ import annotations
 
 from decimal import Decimal

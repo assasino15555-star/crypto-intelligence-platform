@@ -1,13 +1,3 @@
-"""SQLAlchemy ORM models.
-
-Schema design notes:
-  * UUIDs for all primary keys (no sequential IDs leaking scale info).
-  * UTC timestamps via `DateTime(timezone=True)` and `func.now()`.
-  * Unique constraints at the DB level prevent duplicates (user+chain+address,
-    tx_hash per wallet, alert delivery per (alert, event_signature)).
-  * ON DELETE CASCADE where children cannot exist without parent.
-"""
-
 from __future__ import annotations
 
 from .ai_cache import AiAnalysis

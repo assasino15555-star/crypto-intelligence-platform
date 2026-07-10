@@ -1,5 +1,3 @@
-"""FastAPI application factory."""
-
 from __future__ import annotations
 
 import contextlib
@@ -23,6 +21,7 @@ from .core.errors import AppError
 from .core.logging import configure_logging, get_logger
 from .db.session import dispose_engine
 from .providers.registry import get_provider
+from .utils.rate_limit import close_pool
 
 
 @asynccontextmanager
@@ -30,12 +29,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging()
     log = get_logger(__name__)
     log.info("startup environment=%s", get_settings().environment)
-    _ = get_provider()  # warm up provider (validates config eagerly)
+    _ = get_provider()
     try:
         yield
     finally:
         with contextlib.suppress(Exception):
             await get_provider().aclose()
+        with contextlib.suppress(Exception):
+            await close_pool()
         await dispose_engine()
         log.info("shutdown complete")
 
@@ -45,7 +46,6 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Crypto Intelligence Platform API",
         version="0.1.0",
-        description="Read-only crypto wallet intelligence, monitoring, and alerting.",
         docs_url="/docs" if not settings.is_production else None,
         redoc_url=None,
         openapi_url="/openapi.json" if not settings.is_production else None,
@@ -73,7 +73,7 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=exc.status_code,
             content={"error": {"code": exc.code, "message": exc.message}},
-            headers={"X-Request-ID": request.headers.get("X-Request-ID", "-")},
+            headers=exc.headers,
         )
 
     @app.exception_handler(Exception)
@@ -83,7 +83,6 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=500,
             content={"error": {"code": "internal_error", "message": "internal error"}},
-            headers={"X-Request-ID": request.headers.get("X-Request-ID", "-")},
         )
 
     api_v1_prefix = "/api/v1"

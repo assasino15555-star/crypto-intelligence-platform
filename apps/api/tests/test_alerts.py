@@ -1,5 +1,3 @@
-"""Alert evaluation logic tests (deduplication, idempotency)."""
-
 from __future__ import annotations
 
 import datetime as _dt
@@ -12,16 +10,13 @@ from sqlalchemy import select
 
 from apps.api.app.models.alert import Alert, AlertDelivery
 from apps.api.app.models.transaction import Transaction
+from apps.api.app.models.user import User
 from apps.api.app.models.wallet import Wallet
-from apps.api.app.services.alerts import evaluate_alert_for_tx, list_alerts_for_wallet
+from apps.worker.worker.tasks import _event_signature, _try_fire_alert
 
 
 @pytest_asyncio.fixture
 async def wallet_with_alert(db_session):
-    uuid.uuid4()
-    # Use raw inserts to keep the test isolated from auth
-    from apps.api.app.models.user import User
-
     user = User(telegram_id=999_000_001, telegram_username="tester")
     db_session.add(user)
     await db_session.flush()
@@ -44,27 +39,30 @@ async def wallet_with_alert(db_session):
     return user, wallet, alert
 
 
-@pytest.mark.asyncio
-async def test_incoming_above_fires_once(db_session, wallet_with_alert):
-    _, wallet, alert = wallet_with_alert
-    tx = Transaction(
+async def _make_tx(wallet: Wallet, amount: str, direction: str, tx_hash: str) -> Transaction:
+    return Transaction(
         wallet_id=wallet.id,
-        tx_hash="0x" + "a" * 64,
+        tx_hash=tx_hash,
         timestamp=_dt.datetime.now(_dt.UTC).replace(tzinfo=None),
-        direction="in",
+        direction=direction,
         counterparty="0x" + "ff" * 20,
-        native_amount=Decimal("1.0"),
+        native_amount=Decimal(amount),
         native_symbol="ETH",
         status="ok",
         risk_level="low",
     )
+
+
+@pytest.mark.asyncio
+async def test_incoming_above_fires_once(db_session, wallet_with_alert):
+    _, wallet, alert = wallet_with_alert
+    tx = await _make_tx(wallet, "1.0", "in", "0x" + "a" * 64)
     db_session.add(tx)
     await db_session.flush()
-    delivery1 = await evaluate_alert_for_tx(db_session, alert=alert, tx=tx)
+    delivery1 = await _try_fire_alert(db_session, alert, tx)
     assert delivery1 is not None
-    delivery2 = await evaluate_alert_for_tx(db_session, alert=alert, tx=tx)
-    assert delivery2 is None  # idempotent: same tx, no second delivery
-    # Verify only one delivery row
+    delivery2 = await _try_fire_alert(db_session, alert, tx)
+    assert delivery2 is None
     res = await db_session.execute(select(AlertDelivery).where(AlertDelivery.alert_id == alert.id))
     assert len(list(res.scalars().all())) == 1
 
@@ -72,40 +70,20 @@ async def test_incoming_above_fires_once(db_session, wallet_with_alert):
 @pytest.mark.asyncio
 async def test_incoming_above_below_threshold_no_fire(db_session, wallet_with_alert):
     _, wallet, alert = wallet_with_alert
-    tx = Transaction(
-        wallet_id=wallet.id,
-        tx_hash="0x" + "b" * 64,
-        timestamp=_dt.datetime.now(_dt.UTC).replace(tzinfo=None),
-        direction="in",
-        counterparty="0x" + "ee" * 20,
-        native_amount=Decimal("0.1"),  # below 0.5 threshold
-        native_symbol="ETH",
-        status="ok",
-        risk_level="low",
-    )
+    tx = await _make_tx(wallet, "0.1", "in", "0x" + "b" * 64)
     db_session.add(tx)
     await db_session.flush()
-    delivery = await evaluate_alert_for_tx(db_session, alert=alert, tx=tx)
+    delivery = await _try_fire_alert(db_session, alert, tx)
     assert delivery is None
 
 
 @pytest.mark.asyncio
 async def test_outgoing_does_not_fire_incoming_alert(db_session, wallet_with_alert):
     _, wallet, alert = wallet_with_alert
-    tx = Transaction(
-        wallet_id=wallet.id,
-        tx_hash="0x" + "c" * 64,
-        timestamp=_dt.datetime.now(_dt.UTC).replace(tzinfo=None),
-        direction="out",
-        counterparty="0x" + "dd" * 20,
-        native_amount=Decimal("100.0"),
-        native_symbol="ETH",
-        status="ok",
-        risk_level="low",
-    )
+    tx = await _make_tx(wallet, "100.0", "out", "0x" + "c" * 64)
     db_session.add(tx)
     await db_session.flush()
-    delivery = await evaluate_alert_for_tx(db_session, alert=alert, tx=tx)
+    delivery = await _try_fire_alert(db_session, alert, tx)
     assert delivery is None
 
 
@@ -114,26 +92,18 @@ async def test_inactive_alert_does_not_fire(db_session, wallet_with_alert):
     _, wallet, alert = wallet_with_alert
     alert.is_active = False
     await db_session.flush()
-    tx = Transaction(
-        wallet_id=wallet.id,
-        tx_hash="0x" + "d" * 64,
-        timestamp=_dt.datetime.now(_dt.UTC).replace(tzinfo=None),
-        direction="in",
-        counterparty="0x" + "cc" * 20,
-        native_amount=Decimal("10.0"),
-        native_symbol="ETH",
-        status="ok",
-        risk_level="low",
-    )
+    tx = await _make_tx(wallet, "10.0", "in", "0x" + "d" * 64)
     db_session.add(tx)
     await db_session.flush()
-    delivery = await evaluate_alert_for_tx(db_session, alert=alert, tx=tx)
+    delivery = await _try_fire_alert(db_session, alert, tx)
     assert delivery is None
 
 
-@pytest.mark.asyncio
-async def test_list_alerts_for_wallet(db_session, wallet_with_alert):
-    _, wallet, alert = wallet_with_alert
-    alerts = await list_alerts_for_wallet(db_session, wallet_id=wallet.id)
-    assert len(alerts) == 1
-    assert alerts[0].id == alert.id
+def test_event_signature_is_deterministic():
+    aid = uuid.uuid4()
+    tid = uuid.uuid4()
+    sig1 = _event_signature(aid, tid, "activity")
+    sig2 = _event_signature(aid, tid, "activity")
+    assert sig1 == sig2
+    sig3 = _event_signature(aid, tid, "incoming_above")
+    assert sig1 != sig3

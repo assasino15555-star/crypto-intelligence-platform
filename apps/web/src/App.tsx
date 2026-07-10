@@ -21,7 +21,6 @@ function useBootstrapAuth() {
           navigate("/", { replace: true });
         })
         .catch((err) => {
-          // eslint-disable-next-line no-console
           console.warn("Telegram login failed", err);
         });
     }

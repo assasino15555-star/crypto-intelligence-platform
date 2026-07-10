@@ -1,5 +1,3 @@
-"""Health, readiness, and liveness routes."""
-
 from __future__ import annotations
 
 import time
@@ -22,11 +20,6 @@ async def liveness() -> dict[str, str]:
 
 @router.get("/ready")
 async def readiness(response: Response) -> dict[str, object]:
-    """Bounded readiness check. Verifies DB only (we don't block on Redis here).
-
-    In production, error details are NOT exposed to avoid leaking internal
-    topology; only the boolean `db` indicator is returned.
-    """
     start = time.monotonic()
     settings = get_settings()
     db_ok = True
@@ -35,9 +28,8 @@ async def readiness(response: Response) -> dict[str, object]:
         engine = get_engine()
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
-    except Exception as exc:  # pragma: no cover - integration path
+    except Exception as exc:
         db_ok = False
-        # Only expose the error category in non-production for debugging.
         db_error = str(exc)[:200] if not settings.is_production else "unavailable"
     elapsed_ms = int((time.monotonic() - start) * 1000)
     if not db_ok:

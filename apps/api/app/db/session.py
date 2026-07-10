@@ -1,10 +1,10 @@
-"""SQLAlchemy async engine, session factory, and Base class."""
-
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
+import redis.asyncio as redis_lib
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -22,6 +22,7 @@ class Base(DeclarativeBase):
 
 _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
+_redis_pool: Any = None
 
 
 def get_engine() -> AsyncEngine:
@@ -71,9 +72,25 @@ async def session_scope() -> AsyncIterator[AsyncSession]:
             raise
 
 
+def get_redis() -> Any:
+    global _redis_pool
+    if _redis_pool is None:
+        settings = get_settings()
+        _redis_pool = redis_lib.ConnectionPool.from_url(
+            str(settings.redis_url),
+            max_connections=20,
+            socket_connect_timeout=3,
+            socket_timeout=3,
+        )
+    return redis_lib.Redis(connection_pool=_redis_pool)
+
+
 async def dispose_engine() -> None:
-    global _engine, _session_factory
+    global _engine, _session_factory, _redis_pool
     if _engine is not None:
         await _engine.dispose()
         _engine = None
         _session_factory = None
+    if _redis_pool is not None:
+        await _redis_pool.disconnect()
+        _redis_pool = None

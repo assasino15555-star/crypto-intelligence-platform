@@ -11,7 +11,6 @@ class ORMModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-# ---- Auth ----
 class InitDataLogin(BaseModel):
     init_data: str = Field(min_length=10, max_length=8192)
 
@@ -31,7 +30,6 @@ class CurrentUser(ORMModel):
     is_active: bool
 
 
-# ---- Wallets ----
 class WalletCreate(BaseModel):
     chain: str = Field(min_length=1, max_length=32)
     address: str = Field(min_length=4, max_length=128)
@@ -104,7 +102,6 @@ class WalletSnapshotOut(ORMModel):
     tokens_count: int
 
 
-# ---- Alerts ----
 class AlertCreate(BaseModel):
     wallet_id: UUID
     kind: str = Field(min_length=1, max_length=32)
@@ -129,7 +126,6 @@ class AlertOut(ORMModel):
     updated_at: datetime
 
 
-# ---- AI ----
 class AiExplainRequest(BaseModel):
     wallet_id: UUID | None = None
     tx_id: UUID | None = None
@@ -143,7 +139,6 @@ class AiExplanationOut(BaseModel):
     input_summary: str
 
 
-# ---- Pagination ----
 class PageMeta(BaseModel):
     page: int
     page_size: int

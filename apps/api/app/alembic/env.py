@@ -1,5 +1,3 @@
-"""Alembic environment for async migrations."""
-
 from __future__ import annotations
 
 import asyncio
@@ -13,7 +11,6 @@ from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
-# Ensure project root is on sys.path so `apps.*` and `shared.*` resolve.
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "packages" / "shared"))
@@ -26,7 +23,6 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Inject database_url from settings, falling back to env var.
 db_url = os.environ.get("DATABASE_URL") or get_settings().database_url
 config.set_main_option("sqlalchemy.url", db_url)
 

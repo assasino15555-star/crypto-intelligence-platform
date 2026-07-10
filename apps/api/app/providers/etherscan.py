@@ -1,12 +1,3 @@
-"""Etherscan provider (Ethereum mainnet and Base via API subdomain).
-
-API key is required and read from settings.BLOCKCHAIN_API_KEY.
-Base URL defaults to https://api.etherscan.io/api but can be overridden per
-chain via BLOCKCHAIN_BASE_URL_<CHAIN_UPPER>. The override URL must be HTTPS,
-no credentials, and must NOT point to private/loopback ranges — see
-apps/api/app/utils/url_safety.py.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -31,7 +22,7 @@ from ..core.errors import ProviderPermanentError, ProviderRetryableError
 from ..core.logging import get_logger
 from ..utils.addresses import is_evm_address, to_eip55
 from ..utils.http_retry import HttpRetry
-from ..utils.url_safety import assert_safe_outbound_url
+from ..utils.url_safety import SafeHttpTransport, assert_safe_outbound_url
 from .base import BlockchainProvider
 
 log = get_logger(__name__)
@@ -54,7 +45,6 @@ class EtherscanProvider(BlockchainProvider):
         override = (s.blockchain_base_url or "").strip()
         if override:
             assert_safe_outbound_url(override)
-            # Apply the same override to all supported chains (configured deployment)
             for k in _BASE_URLS:
                 _BASE_URLS[k] = override
         self._client: httpx.AsyncClient | None = None
@@ -63,7 +53,11 @@ class EtherscanProvider(BlockchainProvider):
         if self._client is None:
             self._client = httpx.AsyncClient(
                 limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
-                follow_redirects=False,  # prevent SSRF via redirect
+                follow_redirects=False,
+                transport=SafeHttpTransport(
+                    limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+                    retries=0,
+                ),
             )
         return self._client
 
@@ -88,7 +82,6 @@ class EtherscanProvider(BlockchainProvider):
             raise ProviderPermanentError("non-json provider response") from exc
         status = data.get("status")
         if str(status) == "0" and data.get("message") == "NOTOK":
-            # Etherscan returns status=0 with NOTOK for rate limit / errors
             result_text = str(data.get("result", "")).lower()
             if "rate limit" in result_text:
                 raise ProviderRetryableError("etherscan rate limited")
@@ -146,7 +139,6 @@ class EtherscanProvider(BlockchainProvider):
         items = data.get("result")
         if not isinstance(items, list):
             return []
-        # Aggregate transfers into net balance per token contract.
         per_token: dict[str, dict[str, Any]] = {}
         for it in items:
             contract = it.get("contractAddress")
@@ -188,7 +180,6 @@ class EtherscanProvider(BlockchainProvider):
     async def fetch_recent_transactions(
         self, chain: str, address: str, *, limit: int = 50
     ) -> list[ParsedTx]:
-        # Native ETH transactions
         normal = await self._get(
             chain,
             {
@@ -265,8 +256,6 @@ def _assess_risk(tx: dict[str, Any], amount: Decimal) -> tuple[WalletRiskLevel, 
         reasons.append("failed_transaction")
     if amount > Decimal("1000"):
         reasons.append("large_value")
-    # Heuristic: counterparty is a known mixer / suspicious pattern would require external data
-    # We avoid faking risk — only flag clear on-chain anomalies.
     if len(reasons) >= 2:
         return WalletRiskLevel.HIGH, reasons
     if reasons:

@@ -15,8 +15,6 @@ if TYPE_CHECKING:
 
 
 class WalletSession(Base):
-    """Server-side session for an authenticated Telegram user."""
-
     __tablename__ = "wallet_sessions"
     __table_args__ = ()
 

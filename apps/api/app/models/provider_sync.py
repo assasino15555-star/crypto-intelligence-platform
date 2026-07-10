@@ -11,8 +11,6 @@ from ..db.session import Base
 
 
 class ProviderSyncState(Base):
-    """Cursor for incremental provider syncs (e.g. last fetched block, last page)."""
-
     __tablename__ = "provider_sync_state"
     __table_args__ = (
         UniqueConstraint("wallet_id", "provider", "scope", name="uq_psync_wallet_provider_scope"),

@@ -1,5 +1,3 @@
-"""Provider factory."""
-
 from __future__ import annotations
 
 from ..core.config import get_settings

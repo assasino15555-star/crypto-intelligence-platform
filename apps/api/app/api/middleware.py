@@ -1,5 +1,3 @@
-"""Request ID middleware + correlation context."""
-
 from __future__ import annotations
 
 import contextvars

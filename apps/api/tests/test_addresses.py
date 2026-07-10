@@ -1,5 +1,3 @@
-"""Address validation and EIP-55 normalization tests."""
-
 from __future__ import annotations
 
 import pytest
@@ -26,7 +24,6 @@ def test_is_evm_address_rejects_empty():
 
 
 def test_to_eip55_matches_known_vector():
-    # Vitalik's address — known EIP-55 checksum from the spec
     addr = "0x52908400098527886e0f7030069857d2e4169ee7"
     expected = "0x52908400098527886E0F7030069857D2E4169EE7"
     assert to_eip55(addr) == expected

@@ -18,6 +18,6 @@ module.exports = {
     "react/prop-types": "off",
     "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_" }],
     "@typescript-eslint/no-explicit-any": "error",
-    "no-console": ["warn", { allow: ["warn", "error"] }],
+    "no-console": "off",
   },
 };

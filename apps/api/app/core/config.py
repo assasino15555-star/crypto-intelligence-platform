@@ -1,12 +1,3 @@
-"""Typed application settings loaded from environment.
-
-Production-safety rules:
-  * Required secrets (APP_SECRET, TELEGRAM_BOT_TOKEN) must be present when
-    ENVIRONMENT == "production".
-  * DEV_BYPASS_AUTH may only be true in non-production environments.
-  * CORS_ORIGINS, TRUSTED_HOSTS are validated and never defaulted to "*".
-"""
-
 from __future__ import annotations
 
 from functools import lru_cache
@@ -16,6 +7,8 @@ from pydantic import Field, RedisDsn, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Environment = Literal["development", "staging", "production"]
+
+_DEV_FALLBACK_SECRET = "dev-only-ephemeral-secret-NOT-FOR-PRODUCTION-001"
 
 
 class Settings(BaseSettings):
@@ -29,39 +22,47 @@ class Settings(BaseSettings):
     environment: Environment = "development"
     log_level: str = "INFO"
 
-    # Telegram
     telegram_bot_token: str = ""
-    telegram_webapp_url: str = "http://localhost:5173"
+    telegram_webapp_url: str = "https://localhost"
 
-    # App / sessions
     app_secret: str = ""
     session_ttl_seconds: int = 3600
-    initdata_max_age_seconds: int = 3600
-    cors_origins_raw: str = Field(default="http://localhost:5173", validation_alias="CORS_ORIGINS")
+    session_max_lifetime_seconds: int = 86400
+    initdata_max_age_seconds: int = 300
+    initdata_replay_window_seconds: int = 300
+    cors_origins_raw: str = Field(default="", validation_alias="CORS_ORIGINS")
     trusted_hosts_raw: str = Field(default="", validation_alias="TRUSTED_HOSTS")
 
-    # Database / Redis
     database_url: str
     redis_url: RedisDsn
 
-    # Blockchain provider
     blockchain_provider: Literal["etherscan", "mock"] = "mock"
     blockchain_api_key: str = ""
     blockchain_base_url: str = ""
     provider_http_timeout: float = 10.0
     provider_max_retries: int = 4
+    provider_max_response_bytes: int = 1_048_576
 
-    # AI provider
     ai_provider: Literal["openai", "mock"] = "mock"
     ai_api_key: str = ""
     ai_base_url: str = "https://api.openai.com/v1"
     ai_model: str = "gpt-4o-mini"
     ai_http_timeout: float = 20.0
+    ai_max_response_bytes: int = 262_144
 
-    # Dev-only flags
+    max_wallets_per_user: int = 20
+    max_alerts_per_user: int = 100
+    max_sessions_per_user: int = 5
+
+    rate_limit_trusted_proxies_raw: str = Field(
+        default="", validation_alias="RATE_LIMIT_TRUSTED_PROXIES"
+    )
+
     dev_bypass_auth: bool = False
 
-    @field_validator("cors_origins_raw", "trusted_hosts_raw", mode="before")
+    @field_validator(
+        "cors_origins_raw", "trusted_hosts_raw", "rate_limit_trusted_proxies_raw", mode="before"
+    )
     @classmethod
     def _strip(cls, v: object) -> object:
         if isinstance(v, str):
@@ -71,36 +72,55 @@ class Settings(BaseSettings):
     @property
     def cors_origins(self) -> list[str]:
         parts = [p.strip() for p in self.cors_origins_raw.split(",") if p.strip()]
-        return parts or ["http://localhost:5173"]
+        return parts
 
     @property
     def trusted_hosts(self) -> list[str]:
         return [p.strip() for p in self.trusted_hosts_raw.split(",") if p.strip()]
 
+    @property
+    def rate_limit_trusted_proxies(self) -> list[str]:
+        return [p.strip() for p in self.rate_limit_trusted_proxies_raw.split(",") if p.strip()]
+
     @model_validator(mode="after")
-    def _enforce_production_constraints(self) -> Settings:
-        if self.environment == "production":
-            if not self.app_secret or len(self.app_secret) < 32:
-                raise ValueError("APP_SECRET must be at least 32 chars in production")
-            if not self.telegram_bot_token:
-                raise ValueError("TELEGRAM_BOT_TOKEN is required in production")
-            if self.dev_bypass_auth:
-                raise ValueError("DEV_BYPASS_AUTH must be false in production")
-            if "*" in self.cors_origins:
-                raise ValueError("Wildcard CORS is not allowed in production")
-            if self.blockchain_provider == "mock":
-                raise ValueError("Mock provider is not allowed in production")
-            if self.ai_provider == "mock":
-                raise ValueError("Mock AI provider is not allowed in production")
-        else:
+    def _enforce_constraints(self) -> Settings:
+        if self.session_ttl_seconds > self.session_max_lifetime_seconds:
+            raise ValueError("SESSION_TTL_SECONDS cannot exceed SESSION_MAX_LIFETIME_SECONDS")
+        if self.initdata_max_age_seconds > 3600:
+            raise ValueError("INITDATA_MAX_AGE_SECONDS cannot exceed 3600")
+        if self.dev_bypass_auth and self.is_production:
+            raise ValueError("DEV_BYPASS_AUTH must be false in production")
+        if self.is_production:
+            self._enforce_production()
+        elif self.is_dev:
             if not self.app_secret:
-                # dev-only default so the app can boot without configuration
-                self.app_secret = "dev-only-secret-do-not-use-in-production-32chars"
+                self.app_secret = _DEV_FALLBACK_SECRET
         if self.blockchain_provider == "etherscan" and not self.blockchain_api_key:
             raise ValueError("BLOCKCHAIN_API_KEY required when BLOCKCHAIN_PROVIDER=etherscan")
         if self.ai_provider == "openai" and not self.ai_api_key:
             raise ValueError("AI_API_KEY required when AI_PROVIDER=openai")
         return self
+
+    def _enforce_production(self) -> None:
+        if not self.app_secret or len(self.app_secret) < 32:
+            raise ValueError("APP_SECRET must be at least 32 chars in production")
+        if self.app_secret == _DEV_FALLBACK_SECRET:
+            raise ValueError("known dev fallback secret is not allowed in production")
+        if not self.telegram_bot_token:
+            raise ValueError("TELEGRAM_BOT_TOKEN is required in production")
+        if not self.cors_origins:
+            raise ValueError("CORS_ORIGINS must be set in production")
+        if "*" in self.cors_origins:
+            raise ValueError("Wildcard CORS is not allowed in production")
+        for origin in self.cors_origins:
+            if not origin.startswith("https://"):
+                raise ValueError(f"CORS origin must be HTTPS in production: {origin}")
+        if not self.trusted_hosts:
+            raise ValueError("TRUSTED_HOSTS must be set in production")
+        if self.blockchain_provider == "mock":
+            raise ValueError("Mock provider is not allowed in production")
+        if self.ai_provider == "mock":
+            raise ValueError("Mock AI provider is not allowed in production")
 
     @property
     def is_production(self) -> bool:

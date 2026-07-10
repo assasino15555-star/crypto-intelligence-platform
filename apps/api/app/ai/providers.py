@@ -1,19 +1,24 @@
-"""Mock and OpenAI-compatible AI providers."""
-
 from __future__ import annotations
 
 import json
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
 from ..core.config import get_settings
 from ..core.errors import AiProviderError
 from ..core.logging import get_logger
-from ..utils.http_retry import HttpRetry
+from ..utils.http_retry import HttpRetry, assert_json_content_type
+from ..utils.url_safety import SafeHttpTransport, assert_safe_outbound_url
 from .prompt import AiProvider
 
 log = get_logger(__name__)
+
+_AI_HOST_ALLOWLIST = {
+    "api.openai.com",
+    "api.anthropic.com",
+}
 
 
 class MockAiProvider:
@@ -28,13 +33,13 @@ class MockAiProvider:
         addr = data.get("address", "")
         label = data.get("label") or "(no label)"
         txs = data.get("recent_transactions", []) or []
-        tx_summary = f"{len(txs)} recent transactions" if txs else "no recent transactions"
+        tx_count = len(txs)
         return (
-            f"Factual data: wallet on {chain} at {addr[:10]}... ({label}) shows "
-            f"{tx_summary}. Interpretation: based on the on-chain activity alone, "
-            "this wallet appears to be a normal user wallet; no anomalies are present "
-            "in the bounded snapshot provided. This is an automated interpretation, "
-            "not financial advice."
+            f"Factual data: wallet on {chain} at {addr[:10]} shows "
+            f"{tx_count} recent transactions, label is {label}. "
+            "Interpretation: based on the on-chain activity alone, "
+            "this wallet appears to be a normal user wallet. "
+            "This is an automated interpretation, not financial advice."
         )
 
 
@@ -46,10 +51,19 @@ class OpenAiProvider:
         if not s.ai_api_key:
             raise AiProviderError("AI_API_KEY required for openai provider")
         self._api_key = s.ai_api_key
+        assert_safe_outbound_url(s.ai_base_url)
+
+        host = urlparse(s.ai_base_url).hostname or ""
+        if s.is_production and host not in _AI_HOST_ALLOWLIST:
+            raise AiProviderError(f"AI_BASE_URL host '{host}' not in production allowlist")
         self._base_url = s.ai_base_url.rstrip("/")
         self._model = s.ai_model
         self._timeout = s.ai_http_timeout
-        self._retry = HttpRetry(timeout=self._timeout, max_retries=2)
+        self._retry = HttpRetry(
+            timeout=self._timeout,
+            max_retries=2,
+            max_response_bytes=s.ai_max_response_bytes,
+        )
         self._client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
@@ -57,6 +71,10 @@ class OpenAiProvider:
             self._client = httpx.AsyncClient(
                 limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
                 follow_redirects=False,
+                transport=SafeHttpTransport(
+                    limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+                    retries=0,
+                ),
             )
         return self._client
 
@@ -77,10 +95,15 @@ class OpenAiProvider:
         }
         try:
             resp = await self._retry.request(
-                client, "POST", f"{self._base_url}/chat/completions", json=body, headers=headers
+                client,
+                "POST",
+                f"{self._base_url}/chat/completions",
+                json=body,
+                headers=headers,
             )
         except Exception as exc:
-            raise AiProviderError(f"openai request failed: {exc}") from exc
+            raise AiProviderError("openai request failed") from exc
+        assert_json_content_type(resp)
         try:
             data: dict[str, Any] = resp.json()
         except ValueError as exc:
@@ -88,7 +111,7 @@ class OpenAiProvider:
         try:
             content = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
-            raise AiProviderError(f"openai malformed response: {exc}") from exc
+            raise AiProviderError("openai malformed response") from exc
         if not isinstance(content, str):
             raise AiProviderError("openai returned non-string content")
         return content

@@ -1,5 +1,3 @@
-"""AI explanation service: bounded, cached, idempotent."""
-
 from __future__ import annotations
 
 import hashlib
@@ -22,7 +20,6 @@ from ..core.logging import get_logger
 from ..models.ai_cache import AiAnalysis
 from ..models.transaction import Transaction
 from ..models.wallet import Wallet
-from .wallets import get_owned_wallet
 
 log = get_logger(__name__)
 
@@ -30,7 +27,7 @@ log = get_logger(__name__)
 async def explain_wallet(
     db: AsyncSession, *, user_id: uuid.UUID, wallet_id: uuid.UUID
 ) -> AiAnalysis:
-    wallet = await get_owned_wallet(db, user_id=user_id, wallet_id=wallet_id)
+    wallet = await _get_owned_wallet(db, user_id=user_id, wallet_id=wallet_id)
     txs_q = await db.execute(
         select(Transaction)
         .where(Transaction.wallet_id == wallet.id)
@@ -50,14 +47,14 @@ async def explain_wallet(
         tokens_count=0,
     )
     input_signature = _signature(system + user_prompt)
-    cached = await db.execute(
+    cached_q = await db.execute(
         select(AiAnalysis).where(
             AiAnalysis.wallet_id == wallet.id,
             AiAnalysis.kind == "wallet_summary",
             AiAnalysis.input_signature == input_signature,
         )
     )
-    cached_row = cached.scalar_one_or_none()
+    cached_row = cached_q.scalar_one_or_none()
     if cached_row is not None:
         return cached_row
 
@@ -69,7 +66,7 @@ async def explain_wallet(
         input_signature=input_signature,
         input_summary=_summary(wallet, txs_data),
         explanation=explanation,
-        model=get_settings().ai_model if get_settings().ai_provider == "openai" else "mock",
+        model=_model_name(),
         is_cached=False,
     )
     db.add(row)
@@ -80,7 +77,6 @@ async def explain_wallet(
 async def explain_transaction(
     db: AsyncSession, *, user_id: uuid.UUID, tx_id: uuid.UUID
 ) -> AiAnalysis:
-    # Ownership check via wallet
     tx_q = await db.execute(select(Transaction).where(Transaction.id == tx_id))
     tx = tx_q.scalar_one_or_none()
     if tx is None:
@@ -101,14 +97,14 @@ async def explain_transaction(
         tokens_count=0,
     )
     input_signature = _signature(system + user_prompt + str(tx_id))
-    cached = await db.execute(
+    cached_q = await db.execute(
         select(AiAnalysis).where(
             AiAnalysis.tx_id == tx.id,
             AiAnalysis.kind == "tx_explain",
             AiAnalysis.input_signature == input_signature,
         )
     )
-    cached_row = cached.scalar_one_or_none()
+    cached_row = cached_q.scalar_one_or_none()
     if cached_row is not None:
         return cached_row
     explanation = await _call_with_retries(system, user_prompt, max_tokens=300)
@@ -119,12 +115,22 @@ async def explain_transaction(
         input_signature=input_signature,
         input_summary=_summary(wallet, txs_data),
         explanation=explanation,
-        model=get_settings().ai_model if get_settings().ai_provider == "openai" else "mock",
+        model=_model_name(),
         is_cached=False,
     )
     db.add(row)
     await db.flush()
     return row
+
+
+async def _get_owned_wallet(
+    db: AsyncSession, *, user_id: uuid.UUID, wallet_id: uuid.UUID
+) -> Wallet:
+    res = await db.execute(select(Wallet).where(Wallet.id == wallet_id))
+    wallet = res.scalar_one_or_none()
+    if wallet is None or wallet.user_id != user_id:
+        raise NotFoundError("wallet")
+    return wallet
 
 
 async def _call_with_retries(system: str, user_prompt: str, *, max_tokens: int) -> str:
@@ -143,6 +149,11 @@ async def _call_with_retries(system: str, user_prompt: str, *, max_tokens: int) 
 
 def _signature(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()[:32]
+
+
+def _model_name() -> str:
+    settings = get_settings()
+    return settings.ai_model if settings.ai_provider == "openai" else "mock"
 
 
 def _tx_to_dict(tx: Transaction) -> dict[str, Any]:

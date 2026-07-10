@@ -11,14 +11,6 @@ from ..db.session import Base
 
 
 class AiAnalysis(Base):
-    """Bounded cache of AI explanations keyed by an idempotent input signature.
-
-    Storing AI output here lets us:
-      * avoid re-calling the model for the same wallet+state,
-      * provide audit trail for what was sent and returned,
-      * enforce size limits on stored output.
-    """
-
     __tablename__ = "ai_analyses"
     __table_args__ = (Index("ix_ai_wallet_kind", "wallet_id", "kind"),)
 

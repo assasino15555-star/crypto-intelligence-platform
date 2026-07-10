@@ -66,13 +66,6 @@ class Alert(Base):
 
 
 class AlertDelivery(Base):
-    """Idempotent record of a delivered alert notification.
-
-    The (alert_id, event_signature) unique constraint prevents duplicate
-    deliveries when a worker processes the same event twice (e.g. after a crash
-    recovery or retry).
-    """
-
     __tablename__ = "alert_deliveries"
     __table_args__ = (
         UniqueConstraint("alert_id", "event_signature", name="uq_alert_event_delivery"),

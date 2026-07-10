@@ -1,8 +1,3 @@
-"""Mock provider used in tests and local development.
-
-Never enabled in production (Settings._enforce_production_constraints rejects it).
-"""
-
 from __future__ import annotations
 
 from decimal import Decimal
@@ -24,7 +19,6 @@ from ..utils.addresses import is_evm_address, to_eip55
 from .base import BlockchainProvider
 
 
-# Deterministic mock data keyed by address suffix (last 4 chars) so tests can be reproducible.
 class MockProvider(BlockchainProvider):
     name = "mock"
 

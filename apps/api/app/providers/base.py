@@ -1,10 +1,3 @@
-"""Blockchain provider protocol and shared types.
-
-Concrete providers must translate their vendor-specific response formats into
-the normalized `shared.domain` types. The core domain must never depend on a
-vendor's JSON schema.
-"""
-
 from __future__ import annotations
 
 from collections.abc import Iterable

@@ -1,14 +1,3 @@
-"""Taskiq worker entrypoint.
-
-Run with:
-    python -m apps.worker.worker.run_worker
-
-In production, replace the in-memory broker with the Redis broker (see
-`taskiq_redis.RedisAsyncResultBackend`). For this release the in-memory broker
-is sufficient to run all tasks; production deployment should switch to
-TaskiqRedisBroker.
-"""
-
 from __future__ import annotations
 
 import asyncio

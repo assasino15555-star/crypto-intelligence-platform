@@ -1,11 +1,9 @@
-"""FastAPI dependencies: auth, db session, pagination."""
-
 from __future__ import annotations
 
-import uuid
 from collections.abc import AsyncIterator
 
 from fastapi import Depends, Header, Query
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.config import get_settings
@@ -38,11 +36,8 @@ async def get_current_user(
 ) -> User:
     settings = get_settings()
     if settings.dev_bypass_auth and settings.is_dev:
-        # Dev-only: synthetic dev user
-        stmt = await db.execute(
-            __import__("sqlalchemy").select(User).where(User.telegram_id == 999999999)
-        )
-        user = stmt.scalar_one_or_none()
+        res = await db.execute(select(User).where(User.telegram_id == 999999999))
+        user = res.scalar_one_or_none()
         if user is None:
             user = User(
                 telegram_id=999999999,
@@ -80,8 +75,3 @@ def pagination(
     page_size: int = Query(default=20, ge=1, le=100),
 ) -> Pagination:
     return Pagination(page=page, page_size=page_size)
-
-
-def require_owner_of_wallet(wallet_id: uuid.UUID) -> uuid.UUID:
-    """Helper used by routers — actual ownership check happens in services."""
-    return wallet_id

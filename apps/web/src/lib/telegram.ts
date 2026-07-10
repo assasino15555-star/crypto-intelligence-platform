@@ -1,13 +1,3 @@
-/**
- * Telegram Mini App integration.
- *
- * We never trust user-controlled identity fields from the frontend. The only
- * thing we accept from window.Telegram.WebApp is the cryptographically signed
- * `initData` string, which the backend verifies (HMAC over the data-check
- * string). All user identity is derived server-side from the verified
- * initData.
- */
-
 declare global {
   interface Window {
     Telegram?: {
@@ -40,7 +30,7 @@ export function initTelegramWebApp(): void {
     tg.ready();
     tg.expand();
   } catch {
-    // some clients throw if called twice
+    // ignore
   }
 }
 

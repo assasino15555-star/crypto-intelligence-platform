@@ -1,13 +1,7 @@
-"""Taskiq broker and tasks definition.
-
-Tasks are idempotent: re-running a sync task for the same wallet will produce
-the same DB state thanks to unique constraints on (wallet_id, tx_hash) and
-(alert_id, event_signature).
-"""
-
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
 import uuid
 from collections.abc import Callable
 from decimal import Decimal
@@ -26,11 +20,6 @@ from apps.api.app.db.session import session_scope
 from apps.api.app.models.alert import Alert, AlertDelivery
 from apps.api.app.models.transaction import Transaction
 from apps.api.app.models.wallet import Wallet, WalletSnapshot
-from apps.api.app.providers.registry import get_provider
-from apps.api.app.services.alerts import (
-    evaluate_alert_for_tx,
-    list_alerts_for_wallet,
-)
 
 log = get_logger(__name__)
 
@@ -38,13 +27,6 @@ F = TypeVar("F", bound=Callable[..., Any])
 
 
 class _InMemoryBroker:
-    """Minimal in-process broker for tests; production uses TaskiqRedisBroker.
-
-    Tasks are awaited directly. This is sufficient for our test suite and for
-    local single-process runs. The Redis broker is wired separately for
-    production-like behavior via `apps.worker.worker.run_worker`.
-    """
-
     def __init__(self) -> None:
         self._tasks: dict[str, Any] = {}
 
@@ -69,64 +51,67 @@ def _register_task(name: str) -> Callable[[F], F]:
     return deco
 
 
-# ---------------------------------------------------------------------------
-# Tasks
-# ---------------------------------------------------------------------------
-
-
 @_register_task("sync_wallet")
 async def sync_wallet_task(wallet_id_str: str) -> dict[str, Any]:
-    """Fetch latest balance + transactions for a wallet and persist.
-
-    Idempotent: re-running for the same wallet state yields no new rows.
-    """
     configure_logging()
     wid = uuid.UUID(wallet_id_str)
     async with session_scope() as db:
         wallet = await db.get(Wallet, wid)
         if wallet is None or not wallet.is_active:
             return {"wallet_id": wallet_id_str, "status": "skipped"}
-        provider = get_provider()
+
+        lock_acquired = await _acquire_wallet_lock(db, wid)
+        if not lock_acquired:
+            return {"wallet_id": wallet_id_str, "status": "locked"}
+
         try:
-            balance = await provider.fetch_balance(wallet.chain, wallet.address)
-            txs = await provider.fetch_recent_transactions(wallet.chain, wallet.address, limit=50)
-        except ProviderPermanentError as exc:
-            log.warning("sync_wallet permanent provider error wid=%s err=%s", wid, exc)
-            return {"wallet_id": wallet_id_str, "status": "permanent_error"}
-        except (ProviderRetryableError, ProviderError) as exc:
-            log.warning("sync_wallet retryable provider error wid=%s err=%s", wid, exc)
-            return {"wallet_id": wallet_id_str, "status": "retryable_error"}
+            from apps.api.app.providers.registry import get_provider
 
-        # Update balance cache
-        wallet.last_native_amount = balance.native_amount
-        wallet.last_synced_at = _dt.datetime.now(_dt.UTC).replace(tzinfo=None)
+            provider = get_provider()
+            try:
+                balance = await provider.fetch_balance(wallet.chain, wallet.address)
+                txs = await provider.fetch_recent_transactions(
+                    wallet.chain, wallet.address, limit=50
+                )
+            except ProviderPermanentError as exc:
+                log.warning("sync_wallet permanent error wid=%s err=%s", wid, exc)
+                return {"wallet_id": wallet_id_str, "status": "permanent_error"}
+            except (ProviderRetryableError, ProviderError) as exc:
+                log.warning("sync_wallet retryable error wid=%s err=%s", wid, exc)
+                return {"wallet_id": wallet_id_str, "status": "retryable_error"}
 
-        new_txs = 0
-        alerts_fired = 0
-        for tx in txs:
-            inserted = await _upsert_transaction(db, wallet, tx)
-            if inserted:
-                new_txs += 1
-                alerts_fired += await _evaluate_alerts_for_tx(db, wallet, inserted)
-        await db.flush()
-        log.info("sync_wallet ok wid=%s new_txs=%s alerts=%s", wid, new_txs, alerts_fired)
-        return {
-            "wallet_id": wallet_id_str,
-            "status": "ok",
-            "new_txs": new_txs,
-            "alerts_fired": alerts_fired,
-        }
+            wallet.last_native_amount = balance.native_amount
+            wallet.last_synced_at = _dt.datetime.now(_dt.UTC).replace(tzinfo=None)
+
+            new_txs = 0
+            alerts_fired = 0
+            for parsed_tx in txs:
+                inserted = await _upsert_transaction(db, wallet, parsed_tx)
+                if inserted is not None:
+                    new_txs += 1
+                    alerts_fired += await _evaluate_alerts_for_tx(db, wallet, inserted)
+            await db.flush()
+            log.info("sync_wallet ok wid=%s new_txs=%s alerts=%s", wid, new_txs, alerts_fired)
+            return {
+                "wallet_id": wallet_id_str,
+                "status": "ok",
+                "new_txs": new_txs,
+                "alerts_fired": alerts_fired,
+            }
+        finally:
+            await _release_wallet_lock(wid)
 
 
 @_register_task("snapshot_wallet")
 async def snapshot_wallet_task(wallet_id_str: str) -> dict[str, Any]:
-    """Take a portfolio snapshot for a wallet."""
     configure_logging()
     wid = uuid.UUID(wallet_id_str)
     async with session_scope() as db:
         wallet = await db.get(Wallet, wid)
         if wallet is None or not wallet.is_active:
             return {"wallet_id": wallet_id_str, "status": "skipped"}
+        from apps.api.app.providers.registry import get_provider
+
         provider = get_provider()
         try:
             balance = await provider.fetch_balance(wallet.chain, wallet.address)
@@ -156,9 +141,8 @@ async def snapshot_wallet_task(wallet_id_str: str) -> dict[str, Any]:
 async def send_telegram_notification_task(
     user_id_str: str, telegram_id: int, text: str
 ) -> dict[str, Any]:
-    """Send a Telegram message via bot. Idempotent at the delivery layer."""
     configure_logging()
-    from apps.bot.bot.notifications import send_message  # local import to avoid startup cycle
+    from apps.bot.bot.notifications import send_message
 
     try:
         await send_message(telegram_id, text)
@@ -168,22 +152,40 @@ async def send_telegram_notification_task(
     return {"user_id": user_id_str, "status": "sent"}
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+async def _acquire_wallet_lock(db: AsyncSession, wallet_id: uuid.UUID) -> bool:
+    from apps.api.app.db.session import get_redis
+
+    redis = get_redis()
+    lock_key = f"wallet_lock:{wallet_id}"
+    try:
+        acquired = await redis.set(lock_key, b"1", ex=120, nx=True)
+        return bool(acquired)
+    except Exception as exc:
+        log.warning("wallet lock redis error: %s", exc)
+        return True
+
+
+async def _release_wallet_lock(wallet_id: uuid.UUID) -> None:
+    from apps.api.app.db.session import get_redis
+
+    redis = get_redis()
+    lock_key = f"wallet_lock:{wallet_id}"
+    try:
+        await redis.delete(lock_key)
+    except Exception as exc:
+        log.warning("wallet unlock redis error: %s", exc)
 
 
 async def _upsert_transaction(
     db: AsyncSession, wallet: Wallet, parsed_tx: Any
 ) -> Transaction | None:
-    """Insert a transaction if (wallet_id, tx_hash) is not already present."""
-    existing = await db.execute(
+    existing_q = await db.execute(
         select(Transaction).where(
             Transaction.wallet_id == wallet.id,
             Transaction.tx_hash == parsed_tx.tx_hash,
         )
     )
-    if existing.scalar_one_or_none() is not None:
+    if existing_q.scalar_one_or_none() is not None:
         return None
     direction = (
         parsed_tx.direction.value
@@ -213,47 +215,81 @@ async def _upsert_transaction(
 
 
 async def _evaluate_alerts_for_tx(db: AsyncSession, wallet: Wallet, tx: Transaction) -> int:
-    alerts = await list_alerts_for_wallet(db, wallet_id=wallet.id)
+    alerts_q = await db.execute(
+        select(Alert).where(Alert.wallet_id == wallet.id, Alert.is_active.is_(True))
+    )
+    alerts = list(alerts_q.scalars().all())
     fired = 0
     for alert in alerts:
-        delivery = await evaluate_alert_for_tx(db, alert=alert, tx=tx)
+        delivery = await _try_fire_alert(db, alert, tx)
         if delivery is not None:
             fired += 1
-            await _enqueue_telegram_alert(db, alert, delivery, tx)
+            await _enqueue_telegram_alert(db, alert, tx)
     return fired
 
 
-async def _enqueue_telegram_alert(
-    db: AsyncSession, alert: Alert, delivery: AlertDelivery, tx: Transaction
-) -> None:
-    """Trigger Telegram notification. In production this enqueues a Taskiq job.
-
-    For local/test, we attempt to send via the bot directly (best-effort).
-    """
-    text = (
-        f"🔔 Alert fired\n"
-        f"Kind: {alert.kind}\n"
-        f"Wallet: {alert.wallet_id}\n"
-        f"Tx: {tx.tx_hash}\n"
-        f"Direction: {tx.direction}\n"
-        f"Amount: {tx.native_amount} {tx.native_symbol}\n"
-        f"Risk: {tx.risk_level}\n"
+async def _try_fire_alert(db: AsyncSession, alert: Alert, tx: Transaction) -> AlertDelivery | None:
+    if not alert.is_active:
+        return None
+    if alert.wallet_id != tx.wallet_id:
+        return None
+    fires = False
+    if (alert.kind == "incoming_above" and tx.direction == "in") or (
+        alert.kind == "outgoing_above" and tx.direction == "out"
+    ):
+        if alert.threshold_amount is not None and tx.native_amount >= Decimal(
+            str(alert.threshold_amount)
+        ):
+            fires = True
+    elif alert.kind == "activity":
+        fires = True
+    elif alert.kind == "token_transfer":
+        fires = tx.token_contract is not None
+    elif alert.kind == "balance_above":
+        return None
+    if not fires:
+        return None
+    sig = _event_signature(alert.id, tx.id, alert.kind)
+    existing_q = await db.execute(
+        select(AlertDelivery).where(
+            AlertDelivery.alert_id == alert.id,
+            AlertDelivery.event_signature == sig,
+        )
     )
-    # Resolve the user's telegram_id
+    if existing_q.scalar_one_or_none() is not None:
+        return None
+    delivery = AlertDelivery(alert_id=alert.id, event_signature=sig, channel="telegram")
+    db.add(delivery)
+    await db.flush()
+    return delivery
+
+
+def _event_signature(alert_id: uuid.UUID, tx_id: uuid.UUID, kind: str) -> str:
+    base = f"{alert_id}:{kind}:{tx_id}"
+    return hashlib.sha256(base.encode("utf-8")).hexdigest()[:32]
+
+
+async def _enqueue_telegram_alert(db: AsyncSession, alert: Alert, tx: Transaction) -> None:
     from apps.api.app.models.user import User
 
     user = await db.get(User, alert.user_id)
     if user is None:
         return
-    # Best-effort: enqueue via broker. The real worker picks this up.
+    text = (
+        f"Alert: {alert.kind}\n"
+        f"Wallet: {alert.wallet_id}\n"
+        f"Tx: {tx.tx_hash}\n"
+        f"Direction: {tx.direction}\n"
+        f"Amount: {tx.native_amount} {tx.native_symbol}\n"
+        f"Risk: {tx.risk_level}"
+    )
     try:
         await _broker.call("send_telegram_notification", str(user.id), user.telegram_id, text)
-    except Exception as exc:  # pragma: no cover
+    except Exception as exc:
         log.warning("enqueue telegram notification failed: %s", exc)
 
 
 async def run_task(name: str, *args: Any, **kwargs: Any) -> Any:
-    """Helper used by tests and by the API enqueue path."""
     return await _broker.call(name, *args, **kwargs)
 
 

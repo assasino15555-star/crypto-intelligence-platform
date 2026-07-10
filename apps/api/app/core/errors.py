@@ -1,15 +1,10 @@
-"""Application error model.
-
-Distinct error types enable clean HTTP mapping and avoid leaking internal
-details to API consumers.
-"""
-
 from __future__ import annotations
 
 
 class AppError(Exception):
     status_code: int = 500
     code: str = "internal_error"
+    headers: dict[str, str] | None = None
 
     def __init__(self, message: str = "", *, code: str | None = None) -> None:
         super().__init__(message or self.code)
@@ -46,6 +41,13 @@ class ConflictError(AppError):
 class RateLimitError(AppError):
     status_code = 429
     code = "rate_limited"
+
+    def __init__(
+        self, message: str = "", *, code: str | None = None, retry_after: int | None = None
+    ) -> None:
+        super().__init__(message, code=code)
+        if retry_after is not None:
+            self.headers = {"Retry-After": str(retry_after)}
 
 
 class ProviderError(AppError):

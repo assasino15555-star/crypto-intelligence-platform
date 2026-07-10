@@ -1,15 +1,3 @@
-"""Telegram bot (aiogram 3.x).
-
-The bot only:
-  - greets the user,
-  - shows a button to open the Mini App,
-  - sends alert notifications triggered by the worker.
-
-It never accepts wallet addresses or secrets via chat. All wallet management
-happens inside the Mini App, where identity is established via validated
-Telegram initData.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -61,7 +49,6 @@ async def cmd_start(message: Message) -> None:
 
 @router.message(F.web_app_data)
 async def on_web_app_data(message: Message) -> None:
-    # We do not trust arbitrary web_app_data messages as commands.
     await message.answer("Received. Use the Mini App for actions.")
 
 

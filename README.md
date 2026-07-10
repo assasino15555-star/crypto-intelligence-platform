@@ -1,135 +1,105 @@
 # Crypto Intelligence Platform
 
-A read-only crypto wallet intelligence, monitoring, and alerting platform
-shipped as a Telegram Mini App. Users add public blockchain wallet addresses
-and receive portfolio summaries, transaction analysis, configurable alerts, and
-AI-generated explanations of wallet activity — all without ever exposing a
-private key.
+Read-only crypto wallet intelligence and monitoring, delivered as a Telegram
+Mini App. Add public wallet addresses, track balances and transactions, set
+alerts, and get AI-generated explanations of on-chain activity — without ever
+touching a private key.
 
-> **Read-only by design.** The platform never requests, stores, transmits, or
-> processes private keys, seed phrases, recovery phrases, or wallet passwords.
-> It does not sign transactions, trade, or interact with wallets beyond
-> reading public on-chain data.
+The platform never requests, stores, or processes private keys, seed phrases,
+recovery phrases, or wallet passwords. It does not sign transactions or trade.
+All data comes from public blockchain APIs.
 
-## Key features
+## Features
 
-- Telegram Mini App with cryptographic initData authentication
-- Watched wallets on EVM chains (Ethereum, Base) with EIP-55 normalization
-- Native balance + token holdings + recent transactions
-- Portfolio snapshots (point-in-time historical views)
-- Configurable alerts (incoming/outgoing above threshold, activity, token transfer)
-- Telegram notifications for fired alerts
-- AI-generated wallet explanations with strict input/output boundaries
-- Transaction risk indicators (low / medium / high) derived from on-chain facts
-- Background workers with idempotent, retryable tasks
-- Production-grade FastAPI backend with strict typing and security boundaries
+- Telegram Mini App with HMAC-verified initData authentication
+- Wallet monitoring on Ethereum and Base (EIP-55 checksum addresses)
+- Native balance, token holdings, recent transactions
+- Portfolio snapshots (point-in-time historical state)
+- Configurable alerts: incoming/outgoing above threshold, activity, token transfers
+- Telegram push notifications when alerts fire
+- AI explanations of wallet activity with strict input/output boundaries
+- Transaction risk indicators based on on-chain facts
+- Background workers with idempotent tasks and distributed locking
+- Distributed rate limiting backed by Redis
+- SSRF protection with DNS resolution validation
+- Full Docker setup with non-root containers, resource limits, and network isolation
 
 ## Architecture
 
-```mermaid
-flowchart LR
-  TelegramUser[Telegram user] -->|initData| Bot[aiogram bot]
-  TelegramUser -->|open Mini App| Web[React + TS + Vite]
-  Web -->|REST /api/v1| API[FastAPI]
-  API --> DB[(PostgreSQL)]
-  API --> Redis[(Redis)]
-  API --> Provider[Blockchain provider]
-  Provider -->|HTTPS| Etherscan[Etherscan / BaseScan]
-  API --> AI[AI provider]
-  AI -->|HTTPS bounded| LLM[OpenAI-compatible]
-  Worker[Taskiq worker] --> DB
-  Worker --> Provider
-  Worker --> Bot
-  Worker -->|alerts| TelegramUser
-  Migrate[Alembic] --> DB
+```
+Telegram user → aiogram bot (onboarding)
+             → React Mini App → FastAPI API → PostgreSQL
+                                                → Redis (rate limits, locks, replay cache)
+                                                → blockchain provider (Etherscan)
+                                                → AI provider (OpenAI-compatible)
+             ← worker sends alert notifications via bot
 ```
 
-The repository is a clean monorepo:
+Repository layout:
 
 ```
 apps/
-  api/        FastAPI app + Alembic migrations + tests
-  bot/        aiogram 3.x Telegram bot
-  web/        React + TypeScript + Vite Mini App
-  worker/     Taskiq-style in-process worker (swappable for Redis broker)
+  api/     FastAPI backend + Alembic migrations + tests
+  bot/     aiogram 3.x Telegram bot
+  web/     React + TypeScript + Vite Mini App
+  worker/  Background task processor
 packages/
-  shared/     Normalized domain types (Chain, ParsedTx, WalletBalance, ...)
-infra/        Dockerfiles, nginx config
-.github/      CI pipeline
+  shared/  Domain types shared across services
+infra/     Dockerfiles, nginx config
+.github/   CI pipeline
 ```
 
-## Technology stack
+## Tech stack
 
-**Backend:** Python 3.12, FastAPI, Pydantic v2, pydantic-settings, SQLAlchemy
-2.x async, Alembic, asyncpg, Redis, httpx, aiogram 3.x, structured logging.
+**Backend:** Python 3.12, FastAPI, Pydantic v2, SQLAlchemy 2 async, Alembic,
+asyncpg, Redis, httpx, aiogram 3.x.
 
-**Frontend:** React 18, TypeScript 5, Vite 5, TanStack Query 5, Tailwind CSS 3,
-Telegram WebApp SDK integration.
+**Frontend:** React 18, TypeScript 5, Vite 5, TanStack Query 5, Tailwind CSS 3.
 
-**Infrastructure:** Docker (multi-stage, non-root), PostgreSQL 16, Redis 7,
-nginx for static frontend serving + reverse proxy to the API.
+**Infra:** Docker (multi-stage, non-root, read-only), PostgreSQL 16, Redis 7,
+nginx unprivileged, internal + frontend network separation.
 
 ## Security model
 
-- **Identity is established exclusively from cryptographically verified Telegram
-  initData.** The backend never trusts frontend-supplied Telegram user IDs.
-- **Sessions** are short-lived HMAC-signed tokens; only the SHA-256 hash is
-  stored server-side. Tokens are never logged.
-- **Authorization** is enforced at every endpoint that operates on a wallet,
-  alert, transaction, or analysis object. Cross-user access returns 404 (no
-  existence leak).
-- **SSRF protection** for outbound requests: HTTPS only, no credentials in
-  URLs, no loopback / private / link-local ranges, no redirects followed.
-- **AI prompt boundary:** user-controlled text is treated as untrusted data,
-  encoded as JSON inside the user prompt, never as instructions. System prompt
-  forbids URLs, code, and commands. Output is sanitized (URLs stripped,
-  control chars removed, length-bounded).
-- **No secrets in the repository.** `.env.example` contains only variable
-  names and safe placeholders.
-- **Production hardening:** `APP_SECRET` ≥ 32 chars, mock providers rejected,
-  wildcard CORS rejected, `DEV_BYPASS_AUTH` forbidden.
+- Identity is derived exclusively from cryptographically verified Telegram
+  initData. The backend never trusts client-supplied user IDs.
+- Session tokens are HMAC-signed, short-lived, capped at a maximum lifetime,
+  and only the SHA-256 hash is stored server-side. Sessions support revoke,
+  revoke-all, and per-user quotas.
+- Every endpoint that touches a wallet, alert, transaction, or AI analysis
+  verifies ownership. Cross-user access returns 404 (no existence leak).
+- Outbound HTTP goes through a custom transport that resolves DNS and rejects
+  loopback, private, link-local, multicast, and metadata-service IPs. Redirects
+  are disabled. AI provider URLs are validated against a production allowlist.
+- Rate limiting is Redis-backed with atomic Lua scripts, per-user keys for
+  authenticated endpoints, per-IP keys for login, and a global AI budget.
+  Trusted proxy configuration uses CIDR networks and right-to-left XFF parsing.
+- AI input is structured JSON with all fields sanitized and length-bounded
+  before serialization. Output is stripped of URLs, HTML, markdown, control
+  characters, and word-count-limited.
+- Telegram initData replay is blocked via Redis nonce cache with TTL matching
+  the freshness window.
+- No secrets in the repository. `.env.example` has only placeholders.
+- Production refuses to start without a strong APP_SECRET, real providers,
+  HTTPS-only CORS, and TRUSTED_HOSTS. Dev auth bypass cannot run in production.
 
-## Supported functionality
-
-| Capability                          | Status                                  |
-| ----------------------------------- | --------------------------------------- |
-| Telegram initData verification      | Implemented + tested                    |
-| Add EVM wallet (Ethereum, Base)     | Implemented (EIP-55 checksum)           |
-| Native balance fetch (Etherscan)    | Implemented (requires `BLOCKCHAIN_API_KEY`) |
-| Token holdings fetch (Etherscan)    | Implemented (requires `BLOCKCHAIN_API_KEY`) |
-| Recent transactions (Etherscan)     | Implemented (requires `BLOCKCHAIN_API_KEY`) |
-| Mock provider (for local dev/tests) | Implemented                             |
-| Portfolio snapshots                 | Implemented                             |
-| Alerts (5 kinds) + Telegram notify  | Implemented + idempotent delivery       |
-| AI explanation (wallet / tx)        | Implemented (mock + OpenAI providers)   |
-| Risk indicators                     | Implemented (low / medium / high)       |
-| React Mini App dashboard            | Implemented                             |
-
-If a credential is unavailable, the integration falls back to a deterministic
-mock provider. Real external calls are never faked.
-
-## Setup
-
-### Prerequisites
-
-- Docker 24+ and Docker Compose v2 (recommended)
-- Or: Python 3.12+, Node 20+, PostgreSQL 16, Redis 7 for local development
-
-### Quick start with Docker
+## Quick start with Docker
 
 ```bash
-cp .env.example .env            # fill in TELEGRAM_BOT_TOKEN, BLOCKCHAIN_API_KEY, etc.
-docker compose up -d db redis   # start infra
-docker compose --profile migrate run --rm migrate  # apply migrations
+cp .env.example .env
+# fill in all required values
+
+docker compose up -d db redis
+docker compose --profile migrate run --rm migrate
 docker compose up -d api worker web
-docker compose --profile bot up -d bot   # optional: long-polling Telegram bot
+docker compose --profile bot up -d bot  # optional
 ```
 
-- API: <http://localhost:8000> (docs at `/docs` in non-production)
-- Web: <http://localhost:5173>
-- Health: `GET /api/v1/health/live` and `GET /api/v1/health/ready`
+- Web app: http://localhost:5173
+- API health: http://localhost:8000/api/v1/health/live
+- API docs: http://localhost:8000/docs (non-production only)
 
-### Local development
+## Local development
 
 ```bash
 # Backend
@@ -138,36 +108,39 @@ pip install -e packages/shared -e .[dev]
 alembic upgrade head
 uvicorn apps.api.app.main:app --reload --port 8000
 
-# Worker (separate terminal)
+# Worker
 python -m apps.worker.worker.run_worker
 
-# Bot (separate terminal)
+# Bot
 python -m apps.bot.bot.main
 
-# Frontend (separate terminal)
+# Frontend
 cd apps/web
 npm ci
 npm run dev
 ```
 
-## Environment configuration
+## Environment variables
 
-All variables are documented in `.env.example`. The most important:
+See `.env.example` for the full list. Key variables:
 
-| Variable                | Purpose                                              |
-| ----------------------- | --------------------------------------------------- |
-| `TELEGRAM_BOT_TOKEN`    | Bot token from @BotFather (required in production)  |
-| `APP_SECRET`            | HMAC secret for session tokens (≥32 chars in prod)  |
-| `DATABASE_URL`          | Async SQLAlchemy URL                                |
-| `REDIS_URL`             | Redis URL for broker + caching                      |
-| `BLOCKCHAIN_PROVIDER`   | `etherscan` or `mock`                                |
-| `BLOCKCHAIN_API_KEY`    | Etherscan API key (required when provider=etherscan)|
-| `AI_PROVIDER`           | `openai` or `mock`                                   |
-| `AI_API_KEY`            | OpenAI-compatible API key (required when provider=openai) |
-| `CORS_ORIGINS`          | Comma-separated allowed origins (no wildcard in prod)|
-| `ENVIRONMENT`           | `development` / `staging` / `production`            |
-
-The app fails fast on missing required production configuration.
+| Variable | Purpose |
+|---|---|
+| `ENVIRONMENT` | `development` / `staging` / `production` |
+| `APP_SECRET` | HMAC secret for session tokens (≥32 chars in production) |
+| `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather |
+| `DATABASE_URL` | Async SQLAlchemy URL |
+| `REDIS_URL` | Redis URL (must include password in production) |
+| `BLOCKCHAIN_PROVIDER` | `etherscan` or `mock` |
+| `BLOCKCHAIN_API_KEY` | Etherscan API key (required when provider=etherscan) |
+| `AI_PROVIDER` | `openai` or `mock` |
+| `AI_API_KEY` | OpenAI-compatible API key (required when provider=openai) |
+| `CORS_ORIGINS` | Comma-separated HTTPS origins (no wildcard in production) |
+| `TRUSTED_HOSTS` | Comma-separated allowed Host header values (required in production) |
+| `RATE_LIMIT_TRUSTED_PROXIES` | CIDR networks of trusted reverse proxies |
+| `MAX_WALLETS_PER_USER` | Wallet quota (default 20) |
+| `MAX_ALERTS_PER_USER` | Alert quota (default 100) |
+| `MAX_SESSIONS_PER_USER` | Active session quota (default 5) |
 
 ## Development commands
 
@@ -178,7 +151,6 @@ ruff check apps packages
 mypy apps/api/app apps/worker/worker apps/bot/bot packages/shared/shared
 pytest apps/api/tests -ra
 alembic upgrade head
-alembic revision --autogenerate -m "describe change"
 
 # Frontend
 cd apps/web
@@ -190,67 +162,37 @@ npm run build
 
 ## Tests
 
-Backend (86 tests): address validation, EIP-55 normalization, Telegram
-initData verification (valid/invalid/tampered/expired/malformed), session
-token issuance and verification, settings validation (production constraints),
-URL/SSRF safety, HTTP retry classification, alert evaluation idempotency,
-worker sync idempotency, AI prompt injection resistance, output sanitization,
-API integration (CRUD + IDOR + pagination + auth required).
+Backend tests (122): address validation and EIP-55 normalization, Telegram
+initData verification (valid, tampered, expired, future, malformed, duplicate
+params, oversized, replay), session token lifecycle (max lifetime, excessive
+exp, old iat, rotation, revoke), settings validation (production constraints,
+dev fallback secret rejection, HTTPS-only CORS, TRUSTED_HOSTS requirement),
+URL/SSRF safety (DNS rebinding, IPv4-mapped IPv6, metadata endpoints, all
+private ranges), HTTP retry classification (429 with Retry-After, transport
+errors, oversized response rejection, Content-Type validation, negative
+Retry-After), rate limiter (XFF spoofing, trusted proxy CIDR, per-user vs
+per-IP, concurrency), alert evaluation idempotency, worker sync idempotency
+with distributed locking, AI prompt injection resistance (label injection,
+malicious transaction text, oversized input), AI output sanitization (URLs,
+HTML, markdown, javascript/data schemes, word count), API integration (CRUD,
+IDOR, pagination bounds, quota enforcement, active_only filter, revoke-all).
 
-Frontend (9 tests): format helpers, wallet form validation (rejects invalid
-addresses, accepts valid, renders backend errors).
+Frontend tests (9): format helpers, wallet form validation.
 
-External API calls are never required: tests use a deterministic mock
-provider and an in-memory SQLite database.
-
-## Project structure
-
-```
-.
-├── apps/
-│   ├── api/                  # FastAPI app
-│   │   ├── app/
-│   │   │   ├── api/v1/       # Routers (auth, wallets, alerts, ai, health)
-│   │   │   ├── ai/           # AI provider abstraction + prompt builder
-│   │   │   ├── alembic/      # Migration env + versions
-│   │   │   ├── core/         # config, logging, errors
-│   │   │   ├── db/           # async engine + session factory
-│   │   │   ├── models/       # SQLAlchemy ORM models
-│   │   │   ├── providers/    # Blockchain providers (etherscan, mock)
-│   │   │   ├── schemas/      # Pydantic v2 DTOs
-│   │   │   ├── security/     # Telegram initData verification + sessions
-│   │   │   ├── services/     # Business logic (wallets, alerts, AI)
-│   │   │   ├── utils/        # addresses, http_retry, url_safety
-│   │   │   └── main.py
-│   │   └── tests/            # 86 backend tests
-│   ├── bot/                  # aiogram 3.x Telegram bot
-│   ├── web/                  # React + TypeScript Mini App
-│   └── worker/               # In-process worker (Taskiq-compatible)
-├── packages/
-│   └── shared/               # Normalized domain types (py.typed)
-├── infra/                    # Dockerfiles + nginx config
-├── .github/workflows/ci.yml  # CI: ruff, mypy, pytest, eslint, tsc, vitest, vite build
-├── alembic.ini
-├── compose.yaml
-├── pyproject.toml
-├── .env.example
-├── .gitignore
-├── .dockerignore
-└── README.md
-```
+Tests use an in-memory SQLite database and a mock provider. No external API
+calls are required.
 
 ## Limitations
 
-- The shipped worker uses an in-process broker (sufficient for a single
-  process; production deployments should switch to TaskiqRedisBroker — the
-  task signatures are unchanged).
-- Etherscan token holdings are derived from `tokentx` transfer history (no
-  direct ERC-20 balanceOf call); this is the API's standard pattern.
-- Pricing is not fetched: `native_usd` and `tokens_usd` are populated only
-  when the provider returns a price. Adding a price oracle is a documented
-  extension point in the provider protocol.
-- No live demo is provided; do not infer one from this README.
-- No real production deployment is claimed.
+- The worker uses an in-process task broker. For multi-process production,
+  switch to TaskiqRedisBroker — task signatures are unchanged.
+- Token holdings are derived from Etherscan `tokentx` transfer history, not
+  direct `balanceOf` calls.
+- USD pricing is not fetched. Adding a price oracle is a provider extension
+  point.
+- No live demo is provided. No real production deployment is claimed.
+- Docker base images are pinned to specific version tags. For full supply-chain
+  hardening, pin by `@sha256:` digest in production deployments.
 
 ## License
 
